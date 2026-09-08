@@ -104,6 +104,30 @@ describe Term::Mux::OutputFilter do
       fired.should be_false
     end
 
+    it "requires an unmarked rule to see an unmarked sequence" do
+      fired  = false
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi('u') do
+        fired = true
+        Term::Mux::Disposition.drop
+      end
+      output_filtered(filter, "\e[?31u").should eq("\e[?31u")
+      fired.should be_false
+      output_filtered(filter, "\e[27u").should eq("")
+      fired.should be_true
+    end
+
+    it "requires a static declaration to see an unmarked sequence" do
+      fired  = false
+      filter = Term::Mux::OutputFilter.new
+      filter.on(Term::Mux::Sequences::CUP) do
+        fired = true
+        Term::Mux::Disposition.drop
+      end
+      output_filtered(filter, "\e[?1;1H").should eq("\e[?1;1H")
+      fired.should be_false
+    end
+
     it "requires the params to match" do
       fired  = false
       filter = Term::Mux::OutputFilter.new
@@ -137,6 +161,28 @@ describe Term::Mux::OutputFilter do
       fired.should be_true
     end
 
+    it "matches params against the first value of each group" do
+      fired  = false
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi('m', params: [38]) do
+        fired = true
+        Term::Mux::Disposition.drop
+      end
+      output_filtered(filter, "\e[38:2::255:0:0m").should eq("")
+      fired.should be_true
+    end
+
+    it "does not match a rule param against an omitted group" do
+      fired  = false
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi('m', params: [1, 0]) do
+        fired = true
+        Term::Mux::Disposition.drop
+      end
+      output_filtered(filter, "\e[1;;4m").should eq("\e[1;;4m")
+      fired.should be_false
+    end
+
     it "takes the first matching rule" do
       order  = [] of Int32
       filter = Term::Mux::OutputFilter.new
@@ -156,8 +202,10 @@ describe Term::Mux::OutputFilter do
       output_filtered(filter, "\e[5H")
       value.should eq(1)
     end
+  end
 
-    it "ignores subparameters when parsing" do
+  describe "parameter groups" do
+    it "reads the first value of each group" do
       params = [] of Int32
       filter = Term::Mux::OutputFilter.new
       filter.on(Term::Mux::Sequences::MOUSE_SGR) do |token|
@@ -166,6 +214,102 @@ describe Term::Mux::OutputFilter do
       end
       output_filtered(filter, "\e[<0:1;12;34M").should eq("\e[<0:1;12;34M")
       params.should eq([0, 12, 34])
+    end
+
+    it "reports the group count" do
+      groups = -1
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi('m') { |t| groups = t.groups; Term::Mux::Disposition.pass }
+      output_filtered(filter, "\e[38:2::255:0:0m")
+      groups.should eq(1)
+    end
+
+    it "exposes subparameters" do
+      subs   = [] of Int32?
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi('m') do |t|
+        subs = [t.sub?(0, 0), t.sub?(0, 1), t.sub?(0, 2), t.sub?(0, 3), t.sub?(0, 4), t.sub?(0, 5)]
+        Term::Mux::Disposition.pass
+      end
+      output_filtered(filter, "\e[38:2::255:0:0m")
+      subs.should eq([38, 2, nil, 255, 0, 0])
+    end
+
+    it "counts the subparameters of each group" do
+      counts = [] of Int32
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi('m') do |t|
+        counts = [t.sub_count(0), t.sub_count(1), t.sub_count(2)]
+        Term::Mux::Disposition.pass
+      end
+      output_filtered(filter, "\e[38:5:214;1m")
+      counts.should eq([3, 1, 0])
+    end
+
+    it "defaults a missing subparameter" do
+      value  = -1
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi('m') { |t| value = t.sub(0, 2, 9); Term::Mux::Disposition.pass }
+      output_filtered(filter, "\e[38:5m")
+      value.should eq(9)
+    end
+
+    it "reports an omitted group as nil" do
+      values = [] of Int32?
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi('m') do |t|
+        values = [t.param?(0), t.param?(1), t.param?(2)]
+        Term::Mux::Disposition.pass
+      end
+      output_filtered(filter, "\e[1;;4m")
+      values.should eq([1, nil, 4])
+    end
+
+    it "defaults an omitted leading group" do
+      params = [] of Int32
+      filter = Term::Mux::OutputFilter.new
+      filter.on(Term::Mux::Sequences::CUP) do |token|
+        params = [token.param(0, 1), token.param(1, 1)]
+        Term::Mux::Disposition.pass
+      end
+      output_filtered(filter, "\e[;5H")
+      params.should eq([1, 5])
+    end
+
+    it "defaults an omitted trailing group" do
+      params = [] of Int32
+      filter = Term::Mux::OutputFilter.new
+      filter.on(Term::Mux::Sequences::CUP) do |token|
+        params = [token.param(0, 1), token.param(1, 1)]
+        Term::Mux::Disposition.pass
+      end
+      output_filtered(filter, "\e[3;H")
+      params.should eq([3, 1])
+    end
+
+    it "reports no groups for an empty parameter list" do
+      groups = -1
+      value  = -1
+      filter = Term::Mux::OutputFilter.new
+      filter.on(Term::Mux::Sequences::CUP) do |token|
+        groups = token.groups
+        value  = token.param(0, 1)
+        Term::Mux::Disposition.pass
+      end
+      output_filtered(filter, "\e[H")
+      groups.should eq(0)
+      value.should eq(1)
+    end
+
+    it "returns nil beyond the last group" do
+      values = [] of Int32?
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi('m') do |t|
+        values = [t.param?(3), t.sub?(0, 4), t.sub?(-1, 0)]
+        Term::Mux::Disposition.pass
+      end
+      output_filtered(filter, "\e[38:5;1m")
+      values.should eq([nil, nil, nil])
     end
   end
 
@@ -224,6 +368,85 @@ describe Term::Mux::OutputFilter do
     end
   end
 
+  describe "catch-all rules" do
+    it "dispatches unmatched csi sequences" do
+      finals = [] of Char
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi { |t| finals << t.final.unsafe_chr; Term::Mux::Disposition.pass }
+      output_filtered(filter, "\e[2J\e[?1049h").should eq("\e[2J\e[?1049h")
+      finals.should eq(['J', 'h'])
+    end
+
+    it "prefers a specific csi rule over the catch-all" do
+      hits   = [] of Int32
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi { hits << 0; Term::Mux::Disposition.pass }
+      filter.on(Term::Mux::Sequences::CUP) { hits << 1; Term::Mux::Disposition.pass }
+      output_filtered(filter, "\e[1;1H\e[2J")
+      hits.should eq([1, 0])
+    end
+
+    it "drops through the csi catch-all" do
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi { Term::Mux::Disposition.drop }
+      output_filtered(filter, "a\e[2Jb").should eq("ab")
+    end
+
+    it "dispatches unmatched ss3 sequences" do
+      filter = Term::Mux::OutputFilter.new
+      filter.on_ss3 { Term::Mux::Disposition.drop }
+      output_filtered(filter, "a\eOPb").should eq("ab")
+    end
+
+    it "prefers a specific ss3 rule over the catch-all" do
+      hits   = [] of Int32
+      filter = Term::Mux::OutputFilter.new
+      filter.on_ss3 { hits << 0; Term::Mux::Disposition.pass }
+      filter.on_ss3('P') { hits << 1; Term::Mux::Disposition.pass }
+      output_filtered(filter, "\eOP\eOQ")
+      hits.should eq([1, 0])
+    end
+
+    it "dispatches unmatched two-byte escapes" do
+      filter = Term::Mux::OutputFilter.new
+      filter.on_esc { Term::Mux::Disposition.drop }
+      output_filtered(filter, "x\ecz").should eq("xz")
+    end
+
+    it "prefers a specific esc rule over the catch-all" do
+      hits   = [] of Int32
+      filter = Term::Mux::OutputFilter.new
+      filter.on_esc { hits << 0; Term::Mux::Disposition.pass }
+      filter.on_esc('c') { hits << 1; Term::Mux::Disposition.pass }
+      output_filtered(filter, "\ec\eb")
+      hits.should eq([1, 0])
+    end
+  end
+
+  describe "token bytes" do
+    it "copies the span into fresh storage" do
+      copy   = Bytes.empty
+      filter = Term::Mux::OutputFilter.new
+      filter.on(Term::Mux::Sequences::CUP) { |t| copy = t.copy; Term::Mux::Disposition.pass }
+
+      input = Bytes.new(6)
+      "\e[9;9H".to_slice.copy_to(input)
+      output_filtered(filter, input).should eq("\e[9;9H")
+      String.new(copy).should eq("\e[9;9H")
+
+      input[2] = '1'.ord.to_u8
+      String.new(copy).should eq("\e[9;9H")
+    end
+
+    it "copies a literal token" do
+      copy   = Bytes.empty
+      filter = Term::Mux::OutputFilter.new
+      filter.on_byte('a') { |t| copy = t.copy; Term::Mux::Disposition.pass }
+      output_filtered(filter, "a")
+      String.new(copy).should eq("a")
+    end
+  end
+
   describe "chunk boundaries" do
     it "holds an incomplete sequence until it completes" do
       fired  = 0
@@ -245,6 +468,19 @@ describe Term::Mux::OutputFilter do
       output_filtered(filter, "\e[1").should eq("")
       output_filtered(filter, "2;3").should eq("")
       output_filtered(filter, "4Htail").should eq("tail")
+    end
+
+    it "splits a subparameter group across chunks" do
+      subs   = [] of Int32?
+      filter = Term::Mux::OutputFilter.new
+      filter.on_csi('m') do |t|
+        subs = [t.sub?(0, 0), t.sub?(0, 1), t.sub?(0, 2)]
+        Term::Mux::Disposition.drop
+      end
+      output_filtered(filter, "\e[38:").should eq("")
+      output_filtered(filter, "5:21").should eq("")
+      output_filtered(filter, "4m").should eq("")
+      subs.should eq([38, 5, 214])
     end
 
     it "emits literals before an incomplete sequence" do

@@ -29,16 +29,36 @@ module OutputFilterBench
     nil
   end
 
+  CATCH_ALL = ->(f : Filter) do
+    f.on_csi { Disp.pass }
+    f.on_ss3 { Disp.pass }
+    f.on_esc { Disp.pass }
+    f.on_osc { Disp.pass }
+    f.on_dcs { Disp.pass }
+    f.on_apc { Disp.pass }
+    nil
+  end
+
+  SUBPARAM_RULES = ->(f : Filter) do
+    f.on_csi('m') { |t| Bench.sink(t.param(0) + t.sub(0, 1) + t.sub_count(0)); Disp.pass }
+    f.on_csi { Disp.pass }
+    nil
+  end
+
   SCENARIOS = [
     Scenario.new("plain text, no rules", Bench::Payloads::PLAIN, 0, NO_RULES),
     Scenario.new("plain text, one byte rule", Bench::Payloads::PLAIN, 0, BYTE_RULE),
     Scenario.new("csi redraw, no rules", Bench::Payloads::CSI, 0, NO_RULES),
     Scenario.new("csi redraw, full rules", Bench::Payloads::CSI, 0, FULL_RULES),
+    Scenario.new("csi redraw, catch-all", Bench::Payloads::CSI, 0, CATCH_ALL),
     Scenario.new("sgr runs, full rules", Bench::Payloads::SGR, 0, FULL_RULES),
+    Scenario.new("sgr subparams, no rules", Bench::Payloads::SGR_SUB, 0, NO_RULES),
+    Scenario.new("sgr subparams, param rules", Bench::Payloads::SGR_SUB, 0, SUBPARAM_RULES),
     Scenario.new("mixed, full rules", Bench::Payloads::MIXED, 0, FULL_RULES),
     Scenario.new("mixed, 16 KiB chunks", Bench::Payloads::MIXED, 16384, FULL_RULES),
     Scenario.new("mixed, 4 KiB chunks", Bench::Payloads::MIXED, 4096, FULL_RULES),
     Scenario.new("mixed, 256 B chunks", Bench::Payloads::MIXED, 256, FULL_RULES),
+    Scenario.new("mixed, catch-all", Bench::Payloads::MIXED, 0, CATCH_ALL),
     Scenario.new("strings, full rules", Bench::Payloads::STRINGS, 0, FULL_RULES),
   ]
 

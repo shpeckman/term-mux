@@ -144,6 +144,15 @@ module Bench
       io << "\r\n"
     end
 
+    SGR_SUB = build do |io|
+      i = 0
+      while i < 16
+        io << "\e[38:2::" << (i * 16) << ":0:0m" << "swatch" << "\e[0m"
+        i += 1
+      end
+      io << "\r\n"
+    end
+
     MIXED = build do |io|
       io << "\e[?2026h\e[H\e[2J"
       row = 1
@@ -163,6 +172,15 @@ module Bench
       io << "\e[<0;10;20M\e[<0;10;20m"
       io << "\e[?1004h\e[?1004l"
       io << "\r"
+    end
+
+    KITTY = build do |io|
+      io << "\e[27u\e[13u\e[9u"
+      io << "\e[97;5u\e[97;2:3u\e[97:65;2u"
+      io << "\e[97;;97u\e[57441;1:1u"
+      io << "\e[1;5A\e[1;3B\e[3;2~"
+      io << "\e[<0;120;40M\e[<32;121;41M\e[<0;121;41m"
+      io << "\e[I\e[O\e[48;24;80;600;1200t"
     end
 
     STRINGS = build do |io|

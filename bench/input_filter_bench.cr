@@ -30,6 +30,34 @@ module InputFilterBench
     nil
   end
 
+  KITTY_RULES = ->(f : Filter) do
+    f.on_csi('u') { |t| Bench.sink(t.param(0) + t.sub(0, 1) + t.param(1, 1)); Disp.pass }
+    f.on_csi('~') { |t| Bench.sink(t.param(0)); Disp.pass }
+    f.on_csi('t') { |t| Bench.sink(t.param(0)); Disp.pass }
+    f.on_csi('A') { Disp.pass }
+    f.on_csi('B') { Disp.pass }
+    f.on_csi('I') { Disp.pass }
+    f.on_csi('O') { Disp.pass }
+    f.on_csi('M', marker: '<') { |t| Bench.sink(t.param(1)); Disp.pass }
+    f.on_csi('m', marker: '<') { |t| Bench.sink(t.param(1)); Disp.pass }
+    nil
+  end
+
+  CATCH_ALL = ->(f : Filter) do
+    f.on_csi { Disp.pass }
+    f.on_ss3 { Disp.pass }
+    f.on_esc { Disp.pass }
+    f.on_osc { Disp.pass }
+    f.on_dcs { Disp.pass }
+    f.on_apc { Disp.pass }
+    nil
+  end
+
+  PASTE_RULES = ->(f : Filter) do
+    f.on_paste { |t| Bench.sink(t.bytes.size); Disp.pass }
+    nil
+  end
+
   SCENARIOS = [
     Scenario.new("plain text, no rules", Bench::Payloads::PLAIN, 0, NO_RULES),
     Scenario.new("plain text, one byte rule", Bench::Payloads::PLAIN, 0, BYTE_RULE),
@@ -37,12 +65,20 @@ module InputFilterBench
     Scenario.new("keys, full rules", Bench::Payloads::KEYS, 0, FULL_RULES),
     Scenario.new("keys, 16 B chunks", Bench::Payloads::KEYS, 16, FULL_RULES),
     Scenario.new("keys, 1 B chunks", Bench::Payloads::KEYS, 1, FULL_RULES),
+    Scenario.new("kitty keys, no rules", Bench::Payloads::KITTY, 0, NO_RULES),
+    Scenario.new("kitty keys, event rules", Bench::Payloads::KITTY, 0, KITTY_RULES),
+    Scenario.new("kitty keys, 16 B chunks", Bench::Payloads::KITTY, 16, KITTY_RULES),
+    Scenario.new("kitty keys, catch-all", Bench::Payloads::KITTY, 0, CATCH_ALL),
     Scenario.new("csi redraw, full rules", Bench::Payloads::CSI, 0, FULL_RULES),
+    Scenario.new("csi redraw, catch-all", Bench::Payloads::CSI, 0, CATCH_ALL),
     Scenario.new("sgr runs, full rules", Bench::Payloads::SGR, 0, FULL_RULES),
+    Scenario.new("sgr subparams, catch-all", Bench::Payloads::SGR_SUB, 0, CATCH_ALL),
     Scenario.new("mixed, full rules", Bench::Payloads::MIXED, 0, FULL_RULES),
     Scenario.new("mixed, 4 KiB chunks", Bench::Payloads::MIXED, 4096, FULL_RULES),
     Scenario.new("strings, full rules", Bench::Payloads::STRINGS, 0, FULL_RULES),
     Scenario.new("paste, one byte rule", Bench::Payloads::PASTE, 0, BYTE_RULE),
+    Scenario.new("paste, paste tokens", Bench::Payloads::PASTE, 0, PASTE_RULES),
+    Scenario.new("paste tokens, 4 KiB chunks", Bench::Payloads::PASTE, 4096, PASTE_RULES),
   ]
 
   def self.build(s : Scenario) : Bench::Case

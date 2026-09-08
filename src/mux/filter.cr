@@ -43,16 +43,23 @@ module Term::Mux
       Osc
       Dcs
       Apc
+      PasteStart
+      PasteData
+      PasteEnd
     end
+
+    ABSENT = -1
 
     getter kind   : Kind
     getter bytes  : Bytes
     getter marker : UInt8
     getter final  : UInt8
     getter params : Slice(Int32)
+    getter starts : Slice(Int32)
 
     def initialize(@kind : Kind, @bytes : Bytes, @marker : UInt8 = 0_u8, @final : UInt8 = 0_u8,
-                   @params : Slice(Int32) = Slice(Int32).empty)
+                   @params : Slice(Int32) = Slice(Int32).empty,
+                   @starts : Slice(Int32) = Slice(Int32).empty)
     end
 
     def byte : UInt8
@@ -63,8 +70,39 @@ module Term::Mux
       @final == 0x68_u8
     end
 
-    def param(index : Int32, default : Int32 = 0) : Int32
-      index < @params.size ? @params[index] : default
+    def groups : Int32
+      @starts.size > 1 ? @starts.size - 1 : 0
+    end
+
+    def sub_count(group : Int32) : Int32
+      return 0 if group < 0 || group >= groups
+      @starts.unsafe_fetch(group + 1) - @starts.unsafe_fetch(group)
+    end
+
+    def sub?(group : Int32, index : Int32) : Int32?
+      return nil if index < 0 || group < 0 || group >= groups
+      at = @starts.unsafe_fetch(group) + index
+      return nil if at >= @starts.unsafe_fetch(group + 1)
+      value = @params.unsafe_fetch(at)
+      value == ABSENT ? nil : value
+    end
+
+    def sub(group : Int32, index : Int32, default : Int32 = 0) : Int32
+      sub?(group, index) || default
+    end
+
+    def param?(group : Int32) : Int32?
+      sub?(group, 0)
+    end
+
+    def param(group : Int32, default : Int32 = 0) : Int32
+      sub?(group, 0) || default
+    end
+
+    def copy : Bytes
+      span = Bytes.new(@bytes.size)
+      @bytes.copy_to(span)
+      span
     end
 
     def content : Bytes
@@ -127,20 +165,20 @@ class Term::Mux::InputFilter
   BEL = 0x07_u8
 
   MAX_CARRY  = 8192
-  MAX_PARAMS =   16
+  MAX_PARAMS =   32
+  MAX_STARTS =   33
   TABLE      =  256
   SCAN_LIST  =    4
   SCAN_MIN   =   32
 
-  record CsiRule, marker : UInt8?, params : Slice(Int32), handler : Handler do
+  record CsiRule, marker : UInt8, params : Slice(Int32), handler : Handler do
     def matches?(token : Token) : Bool
-      m = @marker
-      return false if m && m != token.marker
+      return false if @marker != token.marker
       return true if @params.empty?
-      return false if @params.size > token.params.size
+      return false if @params.size > token.groups
       i = 0
       while i < @params.size
-        return false if @params[i] != token.params[i]
+        return false if @params[i] != token.param(i, Token::ABSENT)
         i += 1
       end
       true
@@ -164,17 +202,22 @@ class Term::Mux::InputFilter
   @byte_list_size  : Int32 = 0
   @byte_rule_count : Int32 = 0
 
-  @csi_rules    : Array(Array(CsiRule)?)
-  @ss3_rules    : Array(Handler?)
-  @esc_rules    : Array(Handler?)
-  @string_rules : Array(Handler?)
-  @dcs_rules    : Array(Handler?)
-  @osc_rules    : Hash(Int32, Handler)
-  @osc_any      : Handler? = nil
-  @dcs_any      : Handler? = nil
-  @apc_handler  : Handler? = nil
+  @csi_rules     : Array(Array(CsiRule)?)
+  @ss3_rules     : Array(Handler?)
+  @esc_rules     : Array(Handler?)
+  @string_rules  : Array(Handler?)
+  @dcs_rules     : Array(Handler?)
+  @osc_rules     : Hash(Int32, Handler)
+  @csi_any       : Handler? = nil
+  @ss3_any       : Handler? = nil
+  @esc_any       : Handler? = nil
+  @osc_any       : Handler? = nil
+  @dcs_any       : Handler? = nil
+  @apc_handler   : Handler? = nil
+  @paste_handler : Handler? = nil
 
   @params_buf : StaticArray(Int32, MAX_PARAMS)
+  @starts_buf : StaticArray(Int32, MAX_STARTS)
   @pass_next  : Bool  = false
   @esc_ticks  : Int32 = 0
 
@@ -191,10 +234,11 @@ class Term::Mux::InputFilter
     @byte_mask    = StaticArray(UInt64, 4).new(0_u64)
     @byte_list = uninitialized StaticArray(UInt8, SCAN_LIST)
     @params_buf = uninitialized StaticArray(Int32, MAX_PARAMS)
+    @starts_buf = uninitialized StaticArray(Int32, MAX_STARTS)
   end
 
   def on(seq : Sequence, &handler : Handler) : self
-    add_csi(seq.final, seq.marker == 0_u8 ? nil : seq.marker, seq.params, handler)
+    add_csi(seq.final, seq.marker, seq.params, handler)
     self
   end
 
@@ -222,7 +266,12 @@ class Term::Mux::InputFilter
 
   def on_csi(final : Char, marker : Char? = nil, params : Array(Int32) = [] of Int32, &handler : Handler) : self
     slice = Slice(Int32).new(params.size) { |i| params[i] }
-    add_csi(final.ord.to_u8, marker.try(&.ord.to_u8), slice, handler)
+    add_csi(final.ord.to_u8, marker ? marker.ord.to_u8 : 0_u8, slice, handler)
+    self
+  end
+
+  def on_csi(&handler : Handler) : self
+    @csi_any = handler
     self
   end
 
@@ -231,8 +280,18 @@ class Term::Mux::InputFilter
     self
   end
 
+  def on_ss3(&handler : Handler) : self
+    @ss3_any = handler
+    self
+  end
+
   def on_esc(final : Char, &handler : Handler) : self
     @esc_rules[final.ord.to_u8] = handler
+    self
+  end
+
+  def on_esc(&handler : Handler) : self
+    @esc_any = handler
     self
   end
 
@@ -266,6 +325,11 @@ class Term::Mux::InputFilter
     self
   end
 
+  def on_paste(&handler : Handler) : self
+    @paste_handler = handler
+    self
+  end
+
   def pass_next! : Nil
     @pass_next = true
   end
@@ -275,8 +339,8 @@ class Term::Mux::InputFilter
     return Bytes.empty if chunk.empty?
     if @carry_size == 0
       @carry_off = 0
-      if !@pass_next && !chunk.index(ESC) && (@paste || @byte_rule_count == 0)
-        return chunk
+      if !@pass_next && !chunk.index(ESC)
+        return chunk if @paste ? @paste_handler.nil? : @byte_rule_count == 0
       end
       return feed_direct(chunk)
     end
@@ -426,7 +490,7 @@ class Term::Mux::InputFilter
     case span.to_unsafe[1]
     when 0x4F_u8
       final = span.to_unsafe[2]
-      apply(Token.new(Token::Kind::Ss3, span, 0_u8, final), @ss3_rules.unsafe_fetch(final))
+      apply(Token.new(Token::Kind::Ss3, span, 0_u8, final), @ss3_rules.unsafe_fetch(final) || @ss3_any)
     when 0x5D_u8
       dispatch_osc(span)
     when 0x50_u8
@@ -438,7 +502,7 @@ class Term::Mux::InputFilter
       apply(Token.new(Token::Kind::StringSeq, span, intro), @string_rules.unsafe_fetch(intro))
     else
       final = span.to_unsafe[1]
-      apply(Token.new(Token::Kind::Escape, span, 0_u8, final), @esc_rules.unsafe_fetch(final))
+      apply(Token.new(Token::Kind::Escape, span, 0_u8, final), @esc_rules.unsafe_fetch(final) || @esc_any)
     end
   end
 
@@ -490,24 +554,31 @@ class Term::Mux::InputFilter
       body   = body[1, body.size - 1]
     end
 
-    count = parse_params(body)
+    groups = parse_params(body)
+    values = @starts_buf[groups]
 
-    if final == 0x7E_u8 && marker == 0_u8 && count == 1
+    if final == 0x7E_u8 && marker == 0_u8 && groups == 1 && values == 1
       case @params_buf[0]
       when 200
-        @paste = true
-        emit_span(span)
-        return
+        unless @paste
+          @paste = true
+          emit_paste(Token::Kind::PasteStart, span)
+          return
+        end
       when 201
-        @paste = false
-        emit_span(span)
-        return
+        if @paste
+          @paste = false
+          emit_paste(Token::Kind::PasteEnd, span)
+          return
+        end
       end
     end
 
     return if guarded?(span)
 
-    token   = Token.new(Token::Kind::Csi, span, marker, final, @params_buf.to_slice[0, count])
+    token = Token.new(Token::Kind::Csi, span, marker, final,
+      @params_buf.to_slice[0, values], @starts_buf.to_slice[0, groups + 1])
+
     handler = nil.as(Handler?)
     if rules = @csi_rules.unsafe_fetch(final)
       rules.each do |rule|
@@ -517,44 +588,58 @@ class Term::Mux::InputFilter
         end
       end
     end
+    handler ||= @csi_any
     apply(token, handler)
   end
 
   private def parse_params(body : Bytes) : Int32
-    count = 0
-    value = 0
-    seen  = false
-    skip  = false
+    @starts_buf[0] = 0
+
+    values = 0
+    groups = 0
+    value  = 0
+    seen   = false
+
     body.each do |b|
       case b
       when 0x30_u8..0x39_u8
-        unless skip
-          value = value * 10 + (b - 0x30_u8).to_i32
-          seen  = true
-        end
-      when 0x3B_u8
-        break if count >= MAX_PARAMS
-        @params_buf[count] = value
-        count += 1
+        value = value * 10 + (b - 0x30_u8).to_i32
+        seen  = true
+      when 0x3A_u8
+        break if values >= MAX_PARAMS
+        @params_buf[values] = seen ? value : Token::ABSENT
+        values += 1
         value = 0
         seen  = false
-        skip  = false
-      when 0x3A_u8
-        skip = true
+      when 0x3B_u8
+        break if values >= MAX_PARAMS
+        @params_buf[values] = seen ? value : Token::ABSENT
+        values += 1
+        value  = 0
+        seen   = false
+        groups += 1
+        @starts_buf[groups] = values
       else
         break
       end
     end
-    if (seen || count > 0) && count < MAX_PARAMS
-      @params_buf[count] = value
-      count += 1
+
+    if (seen || values > 0) && values < MAX_PARAMS
+      @params_buf[values] = seen ? value : Token::ABSENT
+      values += 1
     end
-    count
+
+    if values > @starts_buf[groups]
+      groups += 1
+      @starts_buf[groups] = values
+    end
+
+    groups
   end
 
   private def dispatch_literal(run : Bytes) : Nil
     if @paste
-      emit_span(run)
+      emit_paste(Token::Kind::PasteData, run)
       return
     end
 
@@ -658,7 +743,7 @@ class Term::Mux::InputFilter
     @byte_mask[byte >> 6] |= 1_u64 << (byte & 0x3F_u8)
   end
 
-  private def add_csi(final : UInt8, marker : UInt8?, params : Slice(Int32), handler : Handler) : Nil
+  private def add_csi(final : UInt8, marker : UInt8, params : Slice(Int32), handler : Handler) : Nil
     rules = @csi_rules[final]
     unless rules
       rules = [] of CsiRule
@@ -667,9 +752,17 @@ class Term::Mux::InputFilter
     rules << CsiRule.new(marker, params, handler)
   end
 
+  private def emit_paste(kind : Token::Kind, span : Bytes) : Nil
+    if handler = @paste_handler
+      apply(Token.new(kind, span), handler)
+    else
+      emit_span(span)
+    end
+  end
+
   private def guarded?(span : Bytes) : Bool
     if @paste
-      emit_span(span)
+      emit_paste(Token::Kind::PasteData, span)
       return true
     end
     if @pass_next
@@ -750,20 +843,20 @@ class Term::Mux::OutputFilter
   BEL = 0x07_u8
 
   MAX_CARRY  = 8192
-  MAX_PARAMS =   16
+  MAX_PARAMS =   32
+  MAX_STARTS =   33
   TABLE      =  256
   SCAN_LIST  =    4
   SCAN_MIN   =   32
 
-  record CsiRule, marker : UInt8?, params : Slice(Int32), handler : Handler do
+  record CsiRule, marker : UInt8, params : Slice(Int32), handler : Handler do
     def matches?(token : Token) : Bool
-      m = @marker
-      return false if m && m != token.marker
+      return false if @marker != token.marker
       return true if @params.empty?
-      return false if @params.size > token.params.size
+      return false if @params.size > token.groups
       i = 0
       while i < @params.size
-        return false if @params[i] != token.params[i]
+        return false if @params[i] != token.param(i, Token::ABSENT)
         i += 1
       end
       true
@@ -791,11 +884,15 @@ class Term::Mux::OutputFilter
   @string_rules : Array(Handler?)
   @dcs_rules    : Array(Handler?)
   @osc_rules    : Hash(Int32, Handler)
+  @csi_any      : Handler? = nil
+  @ss3_any      : Handler? = nil
+  @esc_any      : Handler? = nil
   @osc_any      : Handler? = nil
   @dcs_any      : Handler? = nil
   @apc_handler  : Handler? = nil
 
   @params_buf : StaticArray(Int32, MAX_PARAMS)
+  @starts_buf : StaticArray(Int32, MAX_STARTS)
 
   def initialize
     @carry        = Buffer.alloc(1024)
@@ -810,10 +907,11 @@ class Term::Mux::OutputFilter
     @byte_mask    = StaticArray(UInt64, 4).new(0_u64)
     @byte_list = uninitialized StaticArray(UInt8, SCAN_LIST)
     @params_buf = uninitialized StaticArray(Int32, MAX_PARAMS)
+    @starts_buf = uninitialized StaticArray(Int32, MAX_STARTS)
   end
 
   def on(seq : Sequence, &handler : Handler) : self
-    add_csi(seq.final, seq.marker == 0_u8 ? nil : seq.marker, seq.params, handler)
+    add_csi(seq.final, seq.marker, seq.params, handler)
     self
   end
 
@@ -841,7 +939,12 @@ class Term::Mux::OutputFilter
 
   def on_csi(final : Char, marker : Char? = nil, params : Array(Int32) = [] of Int32, &handler : Handler) : self
     slice = Slice(Int32).new(params.size) { |i| params[i] }
-    add_csi(final.ord.to_u8, marker.try(&.ord.to_u8), slice, handler)
+    add_csi(final.ord.to_u8, marker ? marker.ord.to_u8 : 0_u8, slice, handler)
+    self
+  end
+
+  def on_csi(&handler : Handler) : self
+    @csi_any = handler
     self
   end
 
@@ -850,8 +953,18 @@ class Term::Mux::OutputFilter
     self
   end
 
+  def on_ss3(&handler : Handler) : self
+    @ss3_any = handler
+    self
+  end
+
   def on_esc(final : Char, &handler : Handler) : self
     @esc_rules[final.ord.to_u8] = handler
+    self
+  end
+
+  def on_esc(&handler : Handler) : self
+    @esc_any = handler
     self
   end
 
@@ -1017,7 +1130,7 @@ class Term::Mux::OutputFilter
     case span.to_unsafe[1]
     when 0x4F_u8
       final = span.to_unsafe[2]
-      apply(Token.new(Token::Kind::Ss3, span, 0_u8, final), @ss3_rules.unsafe_fetch(final))
+      apply(Token.new(Token::Kind::Ss3, span, 0_u8, final), @ss3_rules.unsafe_fetch(final) || @ss3_any)
     when 0x5D_u8
       dispatch_osc(span)
     when 0x50_u8
@@ -1029,7 +1142,7 @@ class Term::Mux::OutputFilter
       apply(Token.new(Token::Kind::StringSeq, span, intro), @string_rules.unsafe_fetch(intro))
     else
       final = span.to_unsafe[1]
-      apply(Token.new(Token::Kind::Escape, span, 0_u8, final), @esc_rules.unsafe_fetch(final))
+      apply(Token.new(Token::Kind::Escape, span, 0_u8, final), @esc_rules.unsafe_fetch(final) || @esc_any)
     end
   end
 
@@ -1081,9 +1194,12 @@ class Term::Mux::OutputFilter
       body   = body[1, body.size - 1]
     end
 
-    count = parse_params(body)
+    groups = parse_params(body)
+    values = @starts_buf[groups]
 
-    token   = Token.new(Token::Kind::Csi, span, marker, final, @params_buf.to_slice[0, count])
+    token = Token.new(Token::Kind::Csi, span, marker, final,
+      @params_buf.to_slice[0, values], @starts_buf.to_slice[0, groups + 1])
+
     handler = nil.as(Handler?)
     if rules = @csi_rules.unsafe_fetch(final)
       rules.each do |rule|
@@ -1093,39 +1209,53 @@ class Term::Mux::OutputFilter
         end
       end
     end
+    handler ||= @csi_any
     apply(token, handler)
   end
 
   private def parse_params(body : Bytes) : Int32
-    count = 0
-    value = 0
-    seen  = false
-    skip  = false
+    @starts_buf[0] = 0
+
+    values = 0
+    groups = 0
+    value  = 0
+    seen   = false
+
     body.each do |b|
       case b
       when 0x30_u8..0x39_u8
-        unless skip
-          value = value * 10 + (b - 0x30_u8).to_i32
-          seen  = true
-        end
-      when 0x3B_u8
-        break if count >= MAX_PARAMS
-        @params_buf[count] = value
-        count += 1
+        value = value * 10 + (b - 0x30_u8).to_i32
+        seen  = true
+      when 0x3A_u8
+        break if values >= MAX_PARAMS
+        @params_buf[values] = seen ? value : Token::ABSENT
+        values += 1
         value = 0
         seen  = false
-        skip  = false
-      when 0x3A_u8
-        skip = true
+      when 0x3B_u8
+        break if values >= MAX_PARAMS
+        @params_buf[values] = seen ? value : Token::ABSENT
+        values += 1
+        value  = 0
+        seen   = false
+        groups += 1
+        @starts_buf[groups] = values
       else
         break
       end
     end
-    if (seen || count > 0) && count < MAX_PARAMS
-      @params_buf[count] = value
-      count += 1
+
+    if (seen || values > 0) && values < MAX_PARAMS
+      @params_buf[values] = seen ? value : Token::ABSENT
+      values += 1
     end
-    count
+
+    if values > @starts_buf[groups]
+      groups += 1
+      @starts_buf[groups] = values
+    end
+
+    groups
   end
 
   private def dispatch_literal(run : Bytes) : Nil
@@ -1200,7 +1330,7 @@ class Term::Mux::OutputFilter
     @byte_mask[byte >> 6] |= 1_u64 << (byte & 0x3F_u8)
   end
 
-  private def add_csi(final : UInt8, marker : UInt8?, params : Slice(Int32), handler : Handler) : Nil
+  private def add_csi(final : UInt8, marker : UInt8, params : Slice(Int32), handler : Handler) : Nil
     rules = @csi_rules[final]
     unless rules
       rules = [] of CsiRule
