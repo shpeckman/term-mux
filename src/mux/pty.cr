@@ -152,8 +152,8 @@ module Term::Mux
 
     def initialize(cols : Int32, rows : Int32, command : String, cwd : String,
                    @on_output : Proc(Bytes, Nil)? = nil,
-                   @on_dead   : Proc(Nil)? = nil,
-                   xpixel     : Int32             = 0, ypixel : Int32 = 0)
+                   @on_dead : Proc(Nil)? = nil,
+                   xpixel : Int32 = 0, ypixel : Int32 = 0)
       @pty = PTY.spawn(cols, rows, command, cwd, xpixel: xpixel, ypixel: ypixel)
       spawn_reader
     end
