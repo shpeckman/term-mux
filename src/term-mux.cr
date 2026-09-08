@@ -4,6 +4,7 @@ require "file_utils"
 
 require "./mux/protocol"
 require "./mux/pty"
+require "./mux/buffer"
 require "./mux/sequence"
 require "./mux/emitter"
 require "./mux/input_filter"

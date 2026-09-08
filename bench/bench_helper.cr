@@ -21,8 +21,9 @@ Term::Mux::Emitter.define do
 end
 
 module Bench
-  WARMUP    = 300.milliseconds
-  DURATION  = 2.seconds
+  WARMUP    = 200.milliseconds
+  DURATION  = 400.milliseconds
+  REPEATS   =           5
   MAX_BATCH =        4096
   TARGET_NS = 2_000_000.0
   MIB       = 1_048_576.0
@@ -38,6 +39,7 @@ module Bench
   def self.banner : Nil
     puts "term-mux benchmarks"
     puts "crystal #{Crystal::VERSION} | term-mux #{Term::Mux::VERSION}"
+    puts "best of #{REPEATS} x #{DURATION.total_milliseconds.to_i} ms after #{WARMUP.total_milliseconds.to_i} ms warmup"
     {% unless flag?(:release) %}
       puts "warning: not compiled with --release, numbers are meaningless"
     {% end %}
@@ -51,18 +53,27 @@ module Bench
   def self.group(title : String, cases : Array(Case)) : Nil
     puts
     puts title
-    puts "-" * 76
-    printf("%-34s %14s %12s %12s\n", "case", "unit/s", "ns/unit", "MiB/s")
+    puts "-" * 86
+    printf("%-34s %14s %12s %12s %9s\n", "case", "unit/s", "ns/unit", "MiB/s", "spread")
     cases.each do |c|
-      calls, elapsed = measure(c.run)
-      report(c, calls, elapsed)
+      best, worst = measure(c.run)
+      report(c, best, worst)
     end
   end
 
-  private def self.measure(run : Proc(Nil)) : {Int64, Time::Span}
+  private def self.measure(run : Proc(Nil)) : {Float64, Float64}
     batch = calibrate(run)
     spin(run, batch, WARMUP)
-    spin(run, batch, DURATION)
+
+    best  = 0.0
+    worst = Float64::INFINITY
+    REPEATS.times do
+      calls, elapsed = spin(run, batch, DURATION)
+      rate  = calls / elapsed.total_seconds
+      best  = rate if rate > best
+      worst = rate if rate < worst
+    end
+    {best, worst}
   end
 
   private def self.calibrate(run : Proc(Nil)) : Int32
@@ -90,14 +101,14 @@ module Bench
     {calls, start.elapsed}
   end
 
-  private def self.report(c : Case, calls : Int64, elapsed : Time::Span) : Nil
-    secs  = elapsed.total_seconds
-    units = calls * c.units
-    printf("%-34s %14.0f %12.1f %12.1f\n",
+  private def self.report(c : Case, best : Float64, worst : Float64) : Nil
+    units = best * c.units
+    printf("%-34s %14.0f %12.1f %12.1f %8.1f%%\n",
       c.name,
-      units / secs,
-      secs * 1e9 / units,
-      (calls * c.bytes) / secs / MIB)
+      units,
+      1e9 / units,
+      best * c.bytes / MIB,
+      (best - worst) / best * 100.0)
   end
 
   module Payloads

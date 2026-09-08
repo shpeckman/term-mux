@@ -3,6 +3,11 @@ class Term::Mux::Emitter
   OSC_INTRO = "\e]".to_slice
   ST        = "\e\\".to_slice
 
+  BEL        = 0x07_u8
+  SEMI       = 0x3B_u8
+  ZERO       = 0x30_u8
+  MAX_DIGITS =      10
+
   enum StringTerminator : UInt8
     Bel
     St
@@ -14,7 +19,7 @@ class Term::Mux::Emitter
   @buf : Bytes
 
   def initialize(capacity : Int32 = 4096, @string_terminator : StringTerminator = StringTerminator::St)
-    @buf = Bytes.new(capacity)
+    @buf = Buffer.alloc(capacity)
   end
 
   def empty? : Bool
@@ -61,13 +66,14 @@ class Term::Mux::Emitter
 
   def byte(value : UInt8) : self
     reserve(1)
-    @buf[@size] = value
+    @buf.to_unsafe[@size] = value
     @size += 1
     self
   end
 
   def num(value : Int32) : self
-    append_num(value)
+    reserve(MAX_DIGITS)
+    @size = write_num(@buf.to_unsafe, @size, value)
     self
   end
 
@@ -82,44 +88,102 @@ class Term::Mux::Emitter
   end
 
   protected def emit_csi(intro : Bytes, values : Slice(Int32), defaults : Slice(Int32), final : UInt8) : self
-    append(intro)
+    reserve(intro.size + values.size * (MAX_DIGITS + 1) + 1)
+
+    dst = @buf.to_unsafe
+    at  = @size
+
+    intro.copy_to(dst + at, intro.size)
+    at += intro.size
+
     last = -1
     i    = 0
     while i < values.size
       last = i unless i < defaults.size && values[i] == defaults[i]
       i += 1
     end
+
     i = 0
     while i <= last
-      byte(0x3B_u8) if i > 0
-      append_num(values[i]) unless i < defaults.size && values[i] == defaults[i]
+      if i > 0
+        dst[at] = SEMI
+        at += 1
+      end
+      unless i < defaults.size && values[i] == defaults[i]
+        at = write_num(dst, at, values[i])
+      end
       i += 1
     end
-    byte(final)
+
+    dst[at] = final
+    @size = at + 1
+    self
   end
 
   protected def emit_osc(code : Int32, payload : String) : self
-    append(OSC_INTRO)
-    append_num(code)
-    byte(0x3B_u8)
-    append(payload.to_slice)
+    body = payload.to_slice
+    reserve(OSC_INTRO.size + MAX_DIGITS + 1 + body.size + ST.size)
+
+    dst = @buf.to_unsafe
+    at  = @size
+
+    OSC_INTRO.copy_to(dst + at, OSC_INTRO.size)
+    at += OSC_INTRO.size
+
+    at = write_num(dst, at, code)
+
+    dst[at] = SEMI
+    at += 1
+
+    body.copy_to(dst + at, body.size)
+    at += body.size
+
     case @string_terminator
-    in StringTerminator::Bel then byte(0x07_u8)
-    in StringTerminator::St  then raw(ST)
+    in StringTerminator::Bel
+      dst[at] = BEL
+      at += 1
+    in StringTerminator::St
+      ST.copy_to(dst + at, ST.size)
+      at += ST.size
     end
+
+    @size = at
+    self
+  end
+
+  private def write_num(dst : UInt8*, at : Int32, value : Int32) : Int32
+    if value <= 0
+      dst[at] = ZERO
+      return at + 1
+    end
+    count = digit_count(value)
+    i     = at + count
+    v     = value
+    while v > 0
+      i -= 1
+      dst[i] = ZERO + (v % 10).to_u8
+      v //= 10
+    end
+    at + count
+  end
+
+  private def digit_count(value : Int32) : Int32
+    return 1 if value < 10
+    return 2 if value < 100
+    return 3 if value < 1_000
+    return 4 if value < 10_000
+    return 5 if value < 100_000
+    return 6 if value < 1_000_000
+    return 7 if value < 10_000_000
+    return 8 if value < 100_000_000
+    return 9 if value < 1_000_000_000
+    10
   end
 
   private def reserve(extra : Int32) : Nil
     needed = @size + extra
     return if needed <= @buf.size
-    cap = @buf.size
-    cap = 64 if cap == 0
-    while cap < needed
-      cap *= 2
-    end
-    grown = Bytes.new(cap)
-    @buf.to_unsafe.copy_to(grown.to_unsafe, @size)
-    @buf = grown
+    @buf = Buffer.grow(@buf, needed, @size)
   end
 
   private def append(src : Bytes) : Nil
@@ -127,32 +191,6 @@ class Term::Mux::Emitter
     reserve(src.size)
     src.copy_to(@buf.to_unsafe + @size, src.size)
     @size += src.size
-  end
-
-  private def append_num(value : Int32) : Nil
-    if value <= 0
-      reserve(1)
-      @buf[@size] = 0x30_u8
-      @size += 1
-      return
-    end
-    digits = uninitialized StaticArray(UInt8, 11)
-    i = 11
-    v = value
-    while v > 0
-      i -= 1
-      digits[i] = 0x30_u8 + (v % 10).to_u8
-      v //= 10
-    end
-    count = 11 - i
-    reserve(count)
-    dst = @buf.to_unsafe + @size
-    j   = 0
-    while j < count
-      dst[j] = digits[i + j]
-      j += 1
-    end
-    @size += count
   end
 
   macro define(&block)

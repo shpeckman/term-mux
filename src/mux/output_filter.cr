@@ -8,6 +8,9 @@ module Term::Mux
 
     MAX_CARRY  = 8192
     MAX_PARAMS =   16
+    TABLE      =  256
+    SCAN_LIST  =    4
+    SCAN_MIN   =   32
 
     record CsiRule, marker : UInt8?, params : Slice(Int32), handler : Handler do
       def matches?(token : Token) : Bool
@@ -24,36 +27,50 @@ module Term::Mux
       end
     end
 
+    @src        : Bytes = Bytes.empty
     @carry      : Bytes
+    @carry_off  : Int32 = 0
     @carry_size : Int32 = 0
     @out        : Bytes
     @out_size   : Int32 = 0
+    @copying    : Bool  = false
+    @passed     : Int32 = 0
 
     @byte_rules      : Array(Handler?)
+    @byte_mask       : StaticArray(UInt64, 4)
+    @byte_list       : StaticArray(UInt8, SCAN_LIST)
+    @byte_list_size  : Int32 = 0
     @byte_rule_count : Int32 = 0
-    @csi_rules       : Hash(UInt8, Array(CsiRule))
-    @ss3_rules       : Hash(UInt8, Handler)
-    @esc_rules       : Hash(UInt8, Handler)
-    @string_rules    : Hash(UInt8, Handler)
+
+    @csi_rules    : Array(Array(CsiRule)?)
+    @ss3_rules    : Array(Handler?)
+    @esc_rules    : Array(Handler?)
+    @string_rules : Array(Handler?)
+    @dcs_rules    : Array(Handler?)
+    @osc_rules    : Hash(Int32, Handler)
+    @osc_any      : Handler? = nil
+    @dcs_any      : Handler? = nil
+    @apc_handler  : Handler? = nil
 
     @params_buf : StaticArray(Int32, MAX_PARAMS)
 
     def initialize
-      @carry        = Bytes.new(1024)
-      @out          = Bytes.new(4096)
-      @byte_rules   = Array(Handler?).new(256, nil)
-      @csi_rules    = Hash(UInt8, Array(CsiRule)).new
-      @ss3_rules    = Hash(UInt8, Handler).new
-      @esc_rules    = Hash(UInt8, Handler).new
-      @string_rules = Hash(UInt8, Handler).new
+      @carry        = Buffer.alloc(1024)
+      @out          = Buffer.alloc(4096)
+      @byte_rules   = Array(Handler?).new(TABLE, nil)
+      @csi_rules    = Array(Array(CsiRule)?).new(TABLE, nil)
+      @ss3_rules    = Array(Handler?).new(TABLE, nil)
+      @esc_rules    = Array(Handler?).new(TABLE, nil)
+      @string_rules = Array(Handler?).new(TABLE, nil)
+      @dcs_rules    = Array(Handler?).new(TABLE, nil)
       @osc_rules    = Hash(Int32, Handler).new
-      @dcs_rules    = Hash(UInt8, Handler).new
+      @byte_mask    = StaticArray(UInt64, 4).new(0_u64)
+      @byte_list = uninitialized StaticArray(UInt8, SCAN_LIST)
       @params_buf = uninitialized StaticArray(Int32, MAX_PARAMS)
     end
 
     def on(seq : Sequence, &handler : Handler) : self
-      rules = (@csi_rules[seq.final] ||= [] of CsiRule)
-      rules << CsiRule.new(seq.marker == 0_u8 ? nil : seq.marker, seq.params, handler)
+      add_csi(seq.final, seq.marker == 0_u8 ? nil : seq.marker, seq.params, handler)
       self
     end
 
@@ -63,7 +80,14 @@ module Term::Mux
     end
 
     def on_byte(byte : UInt8, &handler : Handler) : self
-      @byte_rule_count += 1 unless @byte_rules[byte]
+      unless marked?(byte)
+        mark(byte)
+        @byte_rule_count += 1
+        if @byte_list_size < SCAN_LIST
+          @byte_list[@byte_list_size] = byte
+          @byte_list_size += 1
+        end
+      end
       @byte_rules[byte] = handler
       self
     end
@@ -74,8 +98,7 @@ module Term::Mux
 
     def on_csi(final : Char, marker : Char? = nil, params : Array(Int32) = [] of Int32, &handler : Handler) : self
       slice = Slice(Int32).new(params.size) { |i| params[i] }
-      rules = (@csi_rules[final.ord.to_u8] ||= [] of CsiRule)
-      rules << CsiRule.new(marker.try(&.ord.to_u8), slice, handler)
+      add_csi(final.ord.to_u8, marker.try(&.ord.to_u8), slice, handler)
       self
     end
 
@@ -121,139 +144,197 @@ module Term::Mux
 
     def feed(chunk : Bytes) : Bytes
       return Bytes.empty if chunk.empty?
-      if @carry_size == 0 && !chunk.index(ESC) && @byte_rule_count == 0
-        return chunk
+      if @carry_size == 0
+        @carry_off = 0
+        return chunk if !chunk.index(ESC) && @byte_rule_count == 0
+        return feed_direct(chunk)
       end
-      append_carry(chunk)
-      @out_size = 0
-      scan
-      @out[0, @out_size]
+      feed_carried(chunk)
     end
 
-    private def scan : Nil
+    private def feed_direct(chunk : Bytes) : Bytes
+      @src      = chunk
+      @copying  = false
+      @passed   = 0
+      @out_size = 0
+
+      pos       = scan(chunk)
+      remaining = chunk.size - pos
+
+      if remaining > MAX_CARRY
+        emit_span(chunk[pos, remaining])
+        remaining = 0
+      end
+
+      if remaining > 0
+        ensure_carry(remaining)
+        chunk[pos, remaining].copy_to(@carry.to_unsafe, remaining)
+        @carry_off  = 0
+        @carry_size = remaining
+      end
+
+      result = @copying ? @out[0, @out_size] : chunk[0, @passed]
+      @src   = Bytes.empty
+      result
+    end
+
+    private def feed_carried(chunk : Bytes) : Bytes
+      append_carry(chunk)
+
+      src       = @carry[@carry_off, @carry_size]
+      @src      = src
+      @copying  = false
+      @passed   = 0
+      @out_size = 0
+
+      pos       = scan(src)
+      remaining = @carry_size - pos
+
+      if remaining > MAX_CARRY
+        emit_span(src[pos, remaining])
+        pos += remaining
+        remaining = 0
+      end
+
+      @carry_off += pos
+      @carry_size = remaining
+
+      result = @copying ? @out[0, @out_size] : src[0, @passed]
+      @src   = Bytes.empty
+      result
+    end
+
+    private def scan(src : Bytes) : Int32
       pos  = 0
-      size = @carry_size
+      size = src.size
       while pos < size
-        if @carry[pos] == ESC
-          len = sequence_length(pos, size)
+        if src.to_unsafe[pos] == ESC
+          len = sequence_length(src, pos, size)
           break if len == 0
-          dispatch_sequence(pos, len)
+          dispatch_sequence(src[pos, len])
           pos += len
         else
-          stop = literal_end(pos, size)
-          dispatch_literal(pos, stop)
+          stop = literal_end(src, pos, size)
+          dispatch_literal(src[pos, stop - pos])
           pos = stop
         end
       end
-      consume(pos)
+      pos
     end
 
-    private def literal_end(pos : Int32, size : Int32) : Int32
-      idx = @carry[pos, size - pos].index(ESC)
+    private def literal_end(src : Bytes, pos : Int32, size : Int32) : Int32
+      idx = src[pos, size - pos].index(ESC)
       idx ? pos + idx : size
     end
 
-    private def sequence_length(pos : Int32, size : Int32) : Int32
+    private def sequence_length(src : Bytes, pos : Int32, size : Int32) : Int32
       return 0 if pos + 1 >= size
-      case @carry[pos + 1]
+      ptr = src.to_unsafe
+      case ptr[pos + 1]
       when 0x5B_u8
         i = pos + 2
-        while i < size && @carry[i] >= 0x30_u8 && @carry[i] <= 0x3F_u8
+        while i < size && ptr[i] >= 0x30_u8 && ptr[i] <= 0x3F_u8
           i += 1
         end
-        while i < size && @carry[i] >= 0x20_u8 && @carry[i] <= 0x2F_u8
+        while i < size && ptr[i] >= 0x20_u8 && ptr[i] <= 0x2F_u8
           i += 1
         end
         return 0 if i >= size
-        (@carry[i] >= 0x40_u8 && @carry[i] <= 0x7E_u8) ? i + 1 - pos : 2
+        (ptr[i] >= 0x40_u8 && ptr[i] <= 0x7E_u8) ? i + 1 - pos : 2
       when 0x4F_u8
         pos + 2 < size ? 3 : 0
       when 0x5D_u8, 0x50_u8, 0x5E_u8, 0x5F_u8, 0x58_u8
-        string_length(pos, size)
+        string_length(src, pos, size)
       else
         2
       end
     end
 
-    private def string_length(pos : Int32, size : Int32) : Int32
-      osc = @carry[pos + 1] == 0x5D_u8
+    private def string_length(src : Bytes, pos : Int32, size : Int32) : Int32
+      ptr = src.to_unsafe
+      osc = ptr[pos + 1] == 0x5D_u8
       i   = pos + 2
       while i < size
-        b = @carry[i]
+        b = ptr[i]
         return i + 1 - pos if osc && b == BEL
         if b == ESC
           return 0 if i + 1 >= size
-          return @carry[i + 1] == 0x5C_u8 ? i + 2 - pos : i - pos
+          return ptr[i + 1] == 0x5C_u8 ? i + 2 - pos : i - pos
         end
         i += 1
       end
       0
     end
 
-    private def dispatch_sequence(pos : Int32, len : Int32) : Nil
-      span = @carry[pos, len]
-      if len >= 3 && span[1] == 0x5B_u8
+    private def dispatch_sequence(span : Bytes) : Nil
+      if span.size >= 3 && span.to_unsafe[1] == 0x5B_u8
         dispatch_csi(span)
         return
       end
-      case span[1]
+      case span.to_unsafe[1]
       when 0x4F_u8
-        final = span[2]
-        apply(Token.new(Token::Kind::Ss3, span, 0_u8, final), @ss3_rules[final]?)
+        final = span.to_unsafe[2]
+        apply(Token.new(Token::Kind::Ss3, span, 0_u8, final), @ss3_rules.unsafe_fetch(final))
       when 0x5D_u8
         dispatch_osc(span)
       when 0x50_u8
         dispatch_dcs(span)
       when 0x5F_u8
-        apply(Token.new(Token::Kind::Apc, span, 0x5F_u8), @apc_handler || @string_rules[0x5F_u8]?)
+        apply(Token.new(Token::Kind::Apc, span, 0x5F_u8), @apc_handler || @string_rules.unsafe_fetch(0x5F))
       when 0x5E_u8, 0x58_u8
-        intro = span[1]
-        apply(Token.new(Token::Kind::StringSeq, span, intro), @string_rules[intro]?)
+        intro = span.to_unsafe[1]
+        apply(Token.new(Token::Kind::StringSeq, span, intro), @string_rules.unsafe_fetch(intro))
       else
-        final = span[1]
-        apply(Token.new(Token::Kind::Escape, span, 0_u8, final), @esc_rules[final]?)
+        final = span.to_unsafe[1]
+        apply(Token.new(Token::Kind::Escape, span, 0_u8, final), @esc_rules.unsafe_fetch(final))
       end
     end
 
     private def dispatch_osc(span : Bytes) : Nil
       token   = Token.new(Token::Kind::Osc, span, 0x5D_u8)
-      code    = token.osc_code
-      handler = code ? @osc_rules[code]? : nil
+      handler = nil.as(Handler?)
+      unless @osc_rules.empty?
+        if code = token.osc_code
+          handler = @osc_rules[code]?
+        end
+      end
       handler ||= @osc_any
-      handler ||= @string_rules[0x5D_u8]?
+      handler ||= @string_rules.unsafe_fetch(0x5D)
       apply(token, handler)
     end
 
     private def dispatch_dcs(span : Bytes) : Nil
       final   = dcs_final(span)
-      handler = @dcs_rules[final]?
+      handler = @dcs_rules.unsafe_fetch(final)
       handler ||= @dcs_any
-      handler ||= @string_rules[0x50_u8]?
+      handler ||= @string_rules.unsafe_fetch(0x50)
       apply(Token.new(Token::Kind::Dcs, span, 0x50_u8, final), handler)
     end
 
     private def dcs_final(span : Bytes) : UInt8
-      i = 2
-      while i < span.size && span[i] >= 0x30_u8 && span[i] <= 0x3F_u8
+      ptr  = span.to_unsafe
+      size = span.size
+      i    = 2
+      while i < size && ptr[i] >= 0x30_u8 && ptr[i] <= 0x3F_u8
         i += 1
       end
-      while i < span.size && span[i] >= 0x20_u8 && span[i] <= 0x2F_u8
+      while i < size && ptr[i] >= 0x20_u8 && ptr[i] <= 0x2F_u8
         i += 1
       end
-      if i < span.size && span[i] >= 0x40_u8 && span[i] <= 0x7E_u8
-        span[i]
+      if i < size && ptr[i] >= 0x40_u8 && ptr[i] <= 0x7E_u8
+        ptr[i]
       else
         0_u8
       end
     end
 
     private def dispatch_csi(span : Bytes) : Nil
-      final = span[span.size - 1]
+      final = span.to_unsafe[span.size - 1]
       body  = span[2, span.size - 3]
 
       marker = 0_u8
-      if body.size > 0 && body[0] >= 0x3C_u8 && body[0] <= 0x3F_u8
-        marker = body[0]
+      if body.size > 0 && body.to_unsafe[0] >= 0x3C_u8 && body.to_unsafe[0] <= 0x3F_u8
+        marker = body.to_unsafe[0]
         body   = body[1, body.size - 1]
       end
 
@@ -261,7 +342,7 @@ module Term::Mux
 
       token   = Token.new(Token::Kind::Csi, span, marker, final, @params_buf.to_slice[0, count])
       handler = nil.as(Handler?)
-      if rules = @csi_rules[final]?
+      if rules = @csi_rules.unsafe_fetch(final)
         rules.each do |rule|
           if rule.matches?(token)
             handler = rule.handler
@@ -304,78 +385,145 @@ module Term::Mux
       count
     end
 
-    private def dispatch_literal(pos : Int32, stop : Int32) : Nil
-      run = @carry[pos, stop - pos]
+    private def dispatch_literal(run : Bytes) : Nil
       if @byte_rule_count == 0
-        emit(run)
-        return
+        emit_span(run)
+      elsif @byte_rule_count <= SCAN_LIST && run.size >= SCAN_MIN
+        scan_literal_list(run)
+      else
+        scan_literal_mask(run)
       end
+    end
+
+    private def scan_literal_list(run : Bytes) : Nil
+      size  = run.size
       start = 0
-      i     = 0
-      while i < run.size
-        handler = @byte_rules[run[i]]
-        if handler
-          emit(run[start, i - start]) if i > start
-          apply(Token.new(Token::Kind::Literal, run[i, 1]), handler)
-          start = i + 1
+      while start < size
+        if size - start < SCAN_MIN
+          scan_literal_mask(run[start, size - start])
+          return
+        end
+
+        idx = next_marked(run, start)
+        unless idx
+          emit_span(run[start, size - start])
+          return
+        end
+
+        emit_span(run[start, idx - start]) if idx > start
+        apply(Token.new(Token::Kind::Literal, run[idx, 1]), @byte_rules.unsafe_fetch(run.to_unsafe[idx]))
+        start = idx + 1
+      end
+    end
+
+    private def next_marked(run : Bytes, from : Int32) : Int32?
+      tail = run[from, run.size - from]
+      best = -1
+      i    = 0
+      while i < @byte_list_size
+        if idx = tail.index(@byte_list.unsafe_fetch(i))
+          return from if idx == 0
+          best = idx if best < 0 || idx < best
         end
         i += 1
       end
-      emit(run[start, run.size - start]) if start < run.size
+      best < 0 ? nil : from + best
+    end
+
+    private def scan_literal_mask(run : Bytes) : Nil
+      ptr   = run.to_unsafe
+      size  = run.size
+      start = 0
+      i     = 0
+      while i < size
+        while i < size && !marked?(ptr[i])
+          i += 1
+        end
+        break if i >= size
+
+        emit_span(run[start, i - start]) if i > start
+        apply(Token.new(Token::Kind::Literal, run[i, 1]), @byte_rules.unsafe_fetch(ptr[i]))
+        i += 1
+        start = i
+      end
+      emit_span(run[start, size - start]) if start < size
+    end
+
+    private def marked?(byte : UInt8) : Bool
+      @byte_mask.unsafe_fetch(byte >> 6) & (1_u64 << (byte & 0x3F_u8)) != 0
+    end
+
+    private def mark(byte : UInt8) : Nil
+      @byte_mask[byte >> 6] |= 1_u64 << (byte & 0x3F_u8)
+    end
+
+    private def add_csi(final : UInt8, marker : UInt8?, params : Slice(Int32), handler : Handler) : Nil
+      rules = @csi_rules[final]
+      unless rules
+        rules = [] of CsiRule
+        @csi_rules[final] = rules
+      end
+      rules << CsiRule.new(marker, params, handler)
     end
 
     private def apply(token : Token, handler : Handler?) : Nil
       unless handler
-        emit(token.bytes)
+        emit_span(token.bytes)
         return
       end
       disposition = handler.call(token)
       case disposition.kind
-      in Disposition::Kind::Pass    then emit(token.bytes)
-      in Disposition::Kind::Drop    then nil
-      in Disposition::Kind::Replace then emit(disposition.bytes)
+      in Disposition::Kind::Pass    then emit_span(token.bytes)
+      in Disposition::Kind::Drop    then materialize
+      in Disposition::Kind::Replace then emit_foreign(disposition.bytes)
       end
+    end
+
+    private def emit_span(bytes : Bytes) : Nil
+      return if bytes.empty?
+      if @copying
+        append_out(bytes)
+      else
+        @passed += bytes.size
+      end
+    end
+
+    private def emit_foreign(bytes : Bytes) : Nil
+      materialize
+      append_out(bytes)
+    end
+
+    private def materialize : Nil
+      return if @copying
+      @copying = true
+      append_out(@src[0, @passed]) if @passed > 0
+    end
+
+    private def ensure_carry(size : Int32) : Nil
+      return if size <= @carry.size
+      @carry = Buffer.grow(@carry, size, 0)
     end
 
     private def append_carry(chunk : Bytes) : Nil
       needed = @carry_size + chunk.size
-      if needed > @carry.size
-        cap = @carry.size
-        while cap < needed
-          cap *= 2
+      if @carry_off + needed > @carry.size
+        if needed > @carry.size
+          grown = Buffer.grow(@carry, needed, 0)
+          (@carry.to_unsafe + @carry_off).copy_to(grown.to_unsafe, @carry_size)
+          @carry = grown
+        elsif @carry_size > 0
+          (@carry.to_unsafe + @carry_off).move_to(@carry.to_unsafe, @carry_size)
         end
-        grown = Bytes.new(cap)
-        @carry.to_unsafe.copy_to(grown.to_unsafe, @carry_size)
-        @carry = grown
+        @carry_off = 0
       end
-      chunk.copy_to(@carry.to_unsafe + @carry_size, chunk.size)
+      chunk.copy_to(@carry.to_unsafe + @carry_off + @carry_size, chunk.size)
       @carry_size = needed
     end
 
-    private def consume(pos : Int32) : Nil
-      remaining = @carry_size - pos
-      if remaining > 0 && pos > 0
-        (@carry.to_unsafe + pos).move_to(@carry.to_unsafe, remaining)
-      end
-      if remaining > MAX_CARRY
-        emit(@carry[0, remaining])
-        remaining = 0
-      end
-      @carry_size = remaining
-    end
-
-    private def emit(bytes : Bytes) : Nil
+    private def append_out(bytes : Bytes) : Nil
       return if bytes.empty?
       needed = @out_size + bytes.size
-      if needed > @out.size
-        cap = @out.size
-        while cap < needed
-          cap *= 2
-        end
-        grown = Bytes.new(cap)
-        @out.to_unsafe.copy_to(grown.to_unsafe, @out_size)
-        @out = grown
-      end
+      @out   = Buffer.grow(@out, needed, @out_size) if needed > @out.size
       bytes.copy_to(@out.to_unsafe + @out_size, bytes.size)
       @out_size = needed
     end
