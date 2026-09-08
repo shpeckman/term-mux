@@ -38,7 +38,8 @@ module Term::Mux
       master_fd = LibPty.posix_openpt(LibPty::O_RDWR | LibPty::O_NOCTTY)
       raise "posix_openpt failed" if master_fd < 0
 
-      master = IO::FileDescriptor.new(master_fd, blocking: false)
+      IO::FileDescriptor.set_blocking(master_fd, false)
+      master = IO::FileDescriptor.new(master_fd)
       master.close_on_exec = true
 
       process = begin
