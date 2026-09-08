@@ -46,6 +46,8 @@ module Term::Mux
       @ss3_rules    = Hash(UInt8, Handler).new
       @esc_rules    = Hash(UInt8, Handler).new
       @string_rules = Hash(UInt8, Handler).new
+      @osc_rules    = Hash(Int32, Handler).new
+      @dcs_rules    = Hash(UInt8, Handler).new
       @params_buf = uninitialized StaticArray(Int32, MAX_PARAMS)
     end
 
@@ -89,6 +91,31 @@ module Term::Mux
 
     def on_string(introducer : Char, &handler : Handler) : self
       @string_rules[introducer.ord.to_u8] = handler
+      self
+    end
+
+    def on_osc(code : Int32, &handler : Handler) : self
+      @osc_rules[code] = handler
+      self
+    end
+
+    def on_osc(&handler : Handler) : self
+      @osc_any = handler
+      self
+    end
+
+    def on_dcs(final : Char, &handler : Handler) : self
+      @dcs_rules[final.ord.to_u8] = handler
+      self
+    end
+
+    def on_dcs(&handler : Handler) : self
+      @dcs_any = handler
+      self
+    end
+
+    def on_apc(&handler : Handler) : self
+      @apc_handler = handler
       self
     end
 
@@ -173,12 +200,50 @@ module Term::Mux
       when 0x4F_u8
         final = span[2]
         apply(Token.new(Token::Kind::Ss3, span, 0_u8, final), @ss3_rules[final]?)
-      when 0x5D_u8, 0x50_u8, 0x5E_u8, 0x5F_u8, 0x58_u8
+      when 0x5D_u8
+        dispatch_osc(span)
+      when 0x50_u8
+        dispatch_dcs(span)
+      when 0x5F_u8
+        apply(Token.new(Token::Kind::Apc, span, 0x5F_u8), @apc_handler || @string_rules[0x5F_u8]?)
+      when 0x5E_u8, 0x58_u8
         intro = span[1]
         apply(Token.new(Token::Kind::StringSeq, span, intro), @string_rules[intro]?)
       else
         final = span[1]
         apply(Token.new(Token::Kind::Escape, span, 0_u8, final), @esc_rules[final]?)
+      end
+    end
+
+    private def dispatch_osc(span : Bytes) : Nil
+      token   = Token.new(Token::Kind::Osc, span, 0x5D_u8)
+      code    = token.osc_code
+      handler = code ? @osc_rules[code]? : nil
+      handler ||= @osc_any
+      handler ||= @string_rules[0x5D_u8]?
+      apply(token, handler)
+    end
+
+    private def dispatch_dcs(span : Bytes) : Nil
+      final   = dcs_final(span)
+      handler = @dcs_rules[final]?
+      handler ||= @dcs_any
+      handler ||= @string_rules[0x50_u8]?
+      apply(Token.new(Token::Kind::Dcs, span, 0x50_u8, final), handler)
+    end
+
+    private def dcs_final(span : Bytes) : UInt8
+      i = 2
+      while i < span.size && span[i] >= 0x30_u8 && span[i] <= 0x3F_u8
+        i += 1
+      end
+      while i < span.size && span[i] >= 0x20_u8 && span[i] <= 0x2F_u8
+        i += 1
+      end
+      if i < span.size && span[i] >= 0x40_u8 && span[i] <= 0x7E_u8
+        span[i]
+      else
+        0_u8
       end
     end
 
