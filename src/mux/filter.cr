@@ -48,7 +48,8 @@ module Term::Mux
       PasteEnd
     end
 
-    ABSENT = -1
+    ABSENT    = -1
+    ACCUM_MAX = (Int32::MAX - 9) // 10
 
     getter kind   : Kind
     getter bytes  : Bytes
@@ -123,7 +124,7 @@ module Term::Mux
       content.each do |b|
         break if b == 0x3B_u8
         return nil if b < 0x30_u8 || b > 0x39_u8
-        value = value * 10 + (b - 0x30_u8).to_i32
+        value = value * 10 + (b - 0x30_u8).to_i32 if value <= ACCUM_MAX
         seen  = true
       end
       seen ? value : nil
@@ -561,7 +562,7 @@ module Term::Mux
       body.each do |b|
         case b
         when 0x30_u8..0x39_u8
-          value = value * 10 + (b - 0x30_u8).to_i32
+          value = value * 10 + (b - 0x30_u8).to_i32 if value <= Token::ACCUM_MAX
           seen  = true
         when 0x3A_u8
           break if values >= MAX_PARAMS
