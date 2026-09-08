@@ -7,6 +7,7 @@ require "./mux/pty"
 require "./mux/sequence"
 require "./mux/emitter"
 require "./mux/input_filter"
+require "./mux/output_filter"
 require "./mux/client"
 require "./mux/server"
 

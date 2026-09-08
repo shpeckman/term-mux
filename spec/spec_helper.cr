@@ -39,6 +39,14 @@ def ticked(filter : Term::Mux::InputFilter) : String
   String.new(filter.tick)
 end
 
+def output_filtered(filter : Term::Mux::OutputFilter, input : String) : String
+  String.new(filter.feed(input.to_slice))
+end
+
+def output_filtered(filter : Term::Mux::OutputFilter, input : Bytes) : String
+  String.new(filter.feed(input))
+end
+
 def wait_until(timeout : Time::Span = 2.seconds, &) : Bool
   deadline = Time.instant + timeout
   while Time.instant < deadline
