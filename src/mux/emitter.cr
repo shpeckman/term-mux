@@ -1,6 +1,8 @@
 # src/mux/emitter.cr
 class Term::Mux::Emitter
   OSC_INTRO = "\e]".to_slice
+  DCS_INTRO = "\eP".to_slice
+  APC_INTRO = "\e_".to_slice
   ST        = "\e\\".to_slice
 
   BEL        = 0x07_u8
@@ -138,17 +140,66 @@ class Term::Mux::Emitter
     body.copy_to(dst + at, body.size)
     at += body.size
 
+    @size = write_terminator(dst, at)
+    self
+  end
+
+  protected def emit_dcs(params : Slice(Int32), final : UInt8, payload : String) : self
+    body = payload.to_slice
+    reserve(DCS_INTRO.size + params.size * (MAX_DIGITS + 1) + 1 + body.size + ST.size)
+
+    dst = @buf.to_unsafe
+    at  = @size
+
+    DCS_INTRO.copy_to(dst + at, DCS_INTRO.size)
+    at += DCS_INTRO.size
+
+    i = 0
+    while i < params.size
+      if i > 0
+        dst[at] = SEMI
+        at += 1
+      end
+      at = write_num(dst, at, params[i])
+      i += 1
+    end
+
+    dst[at] = final
+    at += 1
+
+    body.copy_to(dst + at, body.size)
+    at += body.size
+
+    @size = write_terminator(dst, at)
+    self
+  end
+
+  protected def emit_apc(payload : String) : self
+    body = payload.to_slice
+    reserve(APC_INTRO.size + body.size + ST.size)
+
+    dst = @buf.to_unsafe
+    at  = @size
+
+    APC_INTRO.copy_to(dst + at, APC_INTRO.size)
+    at += APC_INTRO.size
+
+    body.copy_to(dst + at, body.size)
+    at += body.size
+
+    @size = write_terminator(dst, at)
+    self
+  end
+
+  private def write_terminator(dst : UInt8*, at : Int32) : Int32
     case @string_terminator
     in StringTerminator::Bel
       dst[at] = BEL
-      at += 1
+      at + 1
     in StringTerminator::St
       ST.copy_to(dst + at, ST.size)
-      at += ST.size
+      at + ST.size
     end
-
-    @size = at
-    self
   end
 
   private def write_num(dst : UInt8*, at : Int32, value : Int32) : Int32
@@ -299,6 +350,28 @@ class Term::Mux::Emitter
 
             def {{mname}}({{pname}} : String) : self
               emit_osc({{const}}_CODE, {{pname}})
+            end
+          end
+
+        {% elsif kind == "dcs" %}
+          {% pname = dargs.empty? ? "data".id : dargs[0].id %}
+          {% cparams = opts["params"] %}
+
+          class ::Term::Mux::Emitter
+            {{const}}_PARAMS = {% if cparams %}Slice[{{cparams.splat}}]{% else %}Slice(Int32).empty{% end %}
+            {{const}}_FINAL  = {{opts["final"]}}.ord.to_u8
+
+            def {{mname}}({{pname}} : String) : self
+              emit_dcs({{const}}_PARAMS, {{const}}_FINAL, {{pname}})
+            end
+          end
+
+        {% elsif kind == "apc" %}
+          {% pname = dargs.empty? ? "data".id : dargs[0].id %}
+
+          class ::Term::Mux::Emitter
+            def {{mname}}({{pname}} : String) : self
+              emit_apc({{pname}})
             end
           end
         {% end %}

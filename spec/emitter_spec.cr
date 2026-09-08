@@ -179,6 +179,53 @@ describe Term::Mux::Emitter do
     end
   end
 
+  describe "dcs declarations" do
+    it "emits a bare final byte and payload" do
+      em = Term::Mux::Emitter.new
+      em.sixel("#0;2;0;0;0")
+      rendered(em).should eq("\ePq#0;2;0;0;0\e\\")
+    end
+
+    it "emits fixed params before the final" do
+      em = Term::Mux::Emitter.new
+      em.sixel_hinted("~")
+      rendered(em).should eq("\eP0;1;0q~\e\\")
+    end
+
+    it "terminates with BEL when configured" do
+      em = Term::Mux::Emitter.new(256, Term::Mux::Emitter::StringTerminator::Bel)
+      em.sixel("~")
+      rendered(em).should eq("\ePq~\a")
+    end
+
+    it "writes utf-8 payloads verbatim" do
+      em = Term::Mux::Emitter.new
+      em.sixel("héllo →")
+      rendered(em).should eq("\ePqhéllo →\e\\")
+    end
+  end
+
+  describe "apc declarations" do
+    it "emits a payload with ST by default" do
+      em = Term::Mux::Emitter.new
+      em.kitty("a=T,f=100;AAAA")
+      rendered(em).should eq("\e_a=T,f=100;AAAA\e\\")
+    end
+
+    it "terminates with BEL when configured" do
+      em = Term::Mux::Emitter.new(256, Term::Mux::Emitter::StringTerminator::Bel)
+      em.kitty("a=q")
+      rendered(em).should eq("\e_a=q\a")
+    end
+
+    it "follows a terminator change" do
+      em = Term::Mux::Emitter.new
+      em.string_terminator = Term::Mux::Emitter::StringTerminator::Bel
+      em.kitty("x")
+      rendered(em).should eq("\e_x\a")
+    end
+  end
+
   describe "emitter and filter agreement" do
     it "emits bytes the filter parses back to the declaration" do
       em = Term::Mux::Emitter.new
@@ -209,6 +256,39 @@ describe Term::Mux::Emitter do
 
       filtered(filter, em.bytes)
       params.should eq([2, 40, 9])
+    end
+
+    it "round-trips dcs payloads through the output filter" do
+      em = Term::Mux::Emitter.new
+      em.sixel_hinted("abc")
+
+      seen    = ""
+      matches = 0
+      filter  = Term::Mux::OutputFilter.new
+      filter.on_dcs('q') do |token|
+        matches += 1
+        seen = String.new(token.content)
+        Term::Mux::Disposition.pass
+      end
+
+      output_filtered(filter, em.bytes).should eq("\eP0;1;0qabc\e\\")
+      matches.should eq(1)
+      seen.should eq("abc")
+    end
+
+    it "round-trips apc payloads through the output filter" do
+      em = Term::Mux::Emitter.new
+      em.kitty("a=T,f=100;AAAA")
+
+      seen   = ""
+      filter = Term::Mux::OutputFilter.new
+      filter.on_apc do |token|
+        seen = String.new(token.content)
+        Term::Mux::Disposition.pass
+      end
+
+      output_filtered(filter, em.bytes).should eq("\e_a=T,f=100;AAAA\e\\")
+      seen.should eq("a=T,f=100;AAAA")
     end
   end
 end

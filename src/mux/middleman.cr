@@ -11,7 +11,7 @@ class Term::Mux::Middleman
   def initialize(@command : String = "", @cwd : String = "",
                  @setup : Bytes = Bytes.empty, @teardown : Bytes = Bytes.empty,
                  escape_ticks : Int32 = 2,
-                 @host_in : IO = STDIN, @host_out : IO = STDOUT)
+                 @host_in     : IO    = STDIN, @host_out : IO = STDOUT)
     @input          = InputFilter.new(escape_ticks)
     @output         = OutputFilter.new
     @emitter        = Emitter.new

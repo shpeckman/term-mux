@@ -21,6 +21,11 @@ Term::Mux::Emitter.define do
   csi home, final: 'H'
 
   osc title(text), code: 0
+
+  dcs sixel(data), final: 'q'
+  dcs sixel_hinted(data), final: 'q', params: {0, 1, 0}
+
+  apc kitty(cmd)
 end
 
 def rendered(emitter : Term::Mux::Emitter) : String
