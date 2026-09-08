@@ -2,7 +2,6 @@
 lib LibPty
   TIOCSWINSZ = 0x5414_u64
   TIOCGWINSZ = 0x5413_u64
-  TIOCSCTTY  = 0x540E_u64
   TIOCGPGRP  = 0x540F_u64
 
   O_RDWR   =   0o2
@@ -19,81 +18,89 @@ lib LibPty
   fun grantpt(fd : LibC::Int) : LibC::Int
   fun unlockpt(fd : LibC::Int) : LibC::Int
   fun ptsname(fd : LibC::Int) : LibC::Char*
-  fun setsid : LibC::PidT
   fun ioctl(fd : LibC::Int, request : UInt64, ...) : LibC::Int
-  fun waitpid(pid : LibC::PidT, status : LibC::Int*, flags : LibC::Int) : LibC::PidT
 end
 
 module Term::Mux
   class PTY
-    getter master : IO::FileDescriptor
-    getter pid    : LibC::PidT
+    SETSID        = "setsid"
+    DEFAULT_SHELL = "/bin/sh"
+    CHILD_ENV     = {"TERM" => "xterm-256color", "COLORTERM" => "truecolor"}
 
-    def initialize(@master : IO::FileDescriptor, @pid : LibC::PidT)
+    getter master  : IO::FileDescriptor
+    getter process : Process
+
+    def initialize(@master : IO::FileDescriptor, @process : Process)
     end
 
     def self.spawn(cols : Int32, rows : Int32, command : String, cwd : String,
                    xpixel : Int32 = 0, ypixel : Int32 = 0) : PTY
       master_fd = LibPty.posix_openpt(LibPty::O_RDWR | LibPty::O_NOCTTY)
       raise "posix_openpt failed" if master_fd < 0
+
+      master = IO::FileDescriptor.new(master_fd, blocking: false)
+      master.close_on_exec = true
+
+      process = begin
+        start(master_fd, cols, rows, xpixel, ypixel, command, cwd)
+      rescue ex
+        master.close
+        raise ex
+      end
+
+      new(master, process)
+    end
+
+    private def self.start(master_fd : Int32, cols : Int32, rows : Int32,
+                           xpixel : Int32, ypixel : Int32,
+                           command : String, cwd : String) : Process
       raise "grantpt failed" if LibPty.grantpt(master_fd) != 0
       raise "unlockpt failed" if LibPty.unlockpt(master_fd) != 0
 
-      slave_name = LibPty.ptsname(master_fd)
-      raise "ptsname failed" if slave_name.null?
+      name = LibPty.ptsname(master_fd)
+      raise "ptsname failed" if name.null?
+      slave_name = String.new(name)
 
-      shell = ENV["SHELL"]? || "/bin/sh"
-      shell = "/bin/sh" if shell.empty?
+      ws = winsize(cols, rows, xpixel, ypixel)
+      raise "TIOCSWINSZ failed" if LibPty.ioctl(master_fd, LibPty::TIOCSWINSZ, pointerof(ws)) != 0
 
-      argv : Array(String)
-      path : String
-      if command.empty?
-        base = File.basename(shell)
-        path = shell
-        argv = ["-#{base}"]
-      else
-        path = "/bin/sh"
-        argv = ["sh", "-c", command]
+      slave_fd = LibC.open(slave_name, LibPty::O_RDWR | LibPty::O_NOCTTY)
+      raise "open #{slave_name} failed" if slave_fd < 0
+
+      slave = IO::FileDescriptor.new(slave_fd)
+      begin
+        Process.new(SETSID, child_args(command),
+          env: CHILD_ENV,
+          input: slave, output: slave, error: slave,
+          chdir: cwd.empty? ? nil : cwd)
+      ensure
+        slave.close
       end
+    end
 
-      argv_buf = Pointer(Pointer(UInt8)).malloc(argv.size + 1)
-      argv.each_with_index { |a, i| argv_buf[i] = a.to_unsafe }
-      argv_buf[argv.size] = Pointer(UInt8).null
+    private def self.child_args(command : String) : Array(String)
+      args = ["--ctty", "--fork", "--wait"]
+      if command.empty?
+        shell = ENV["SHELL"]?
+        shell = DEFAULT_SHELL if shell.nil? || shell.empty?
+        args << shell << "-l"
+      else
+        args << DEFAULT_SHELL << "-c" << command
+      end
+      args
+    end
 
+    private def self.winsize(cols : Int32, rows : Int32, xpixel : Int32, ypixel : Int32) : LibPty::Winsize
       ws = LibPty::Winsize.new
       ws.ws_row = rows.to_u16
       ws.ws_col = cols.to_u16
       ws.ws_xpixel = xpixel.to_u16
       ws.ws_ypixel = ypixel.to_u16
+      ws
+    end
 
-      pid = LibC.fork
-      raise "fork failed" if pid < 0
-
-      if pid == 0
-        LibPty.setsid
-        slave_fd = LibC.open(slave_name, LibPty::O_RDWR)
-        if slave_fd >= 0
-          LibPty.ioctl(slave_fd, LibPty::TIOCSCTTY, 0)
-          LibPty.ioctl(slave_fd, LibPty::TIOCSWINSZ, pointerof(ws))
-          LibC.dup2(slave_fd, 0)
-          LibC.dup2(slave_fd, 1)
-          LibC.dup2(slave_fd, 2)
-          LibC.close(slave_fd) if slave_fd > 2
-        end
-        LibC.close(master_fd)
-        LibC.setenv("TERM", "xterm-256color", 1)
-        LibC.setenv("COLORTERM", "truecolor", 1)
-        LibC.chdir(cwd) unless cwd.empty?
-        LibC.execvp(path, argv_buf)
-        LibC._exit(127)
-      end
-
-      LibPty.ioctl(master_fd, LibPty::TIOCSWINSZ, pointerof(ws))
-
-      IO::FileDescriptor.set_blocking(master_fd, false)
-      io = IO::FileDescriptor.new(master_fd)
-      io.close_on_finalize = false
-      new(io, pid)
+    def pid : Int64
+      @process.pid
     end
 
     def resize(cols : Int32, rows : Int32) : Nil
@@ -115,13 +122,22 @@ module Term::Mux
     end
 
     def alive? : Bool
-      LibPty.waitpid(@pid, out status, 1) == 0
+      !@process.terminated?
     end
 
-    def foreground_pid : LibC::PidT
+    def foreground_pid : Int32
       pgid = 0
       LibPty.ioctl(@master.fd, LibPty::TIOCGPGRP, pointerof(pgid))
-      pgid > 0 ? pgid : @pid
+      pgid > 0 ? pgid : @process.pid.to_i32
+    end
+
+    def terminate : Nil
+      @process.terminate
+    rescue
+    end
+
+    def wait : Process::Status
+      @process.wait
     end
 
     def close : Nil
@@ -141,7 +157,7 @@ module Term::Mux
       spawn_reader
     end
 
-    def pid : LibC::PidT
+    def pid : Int64
       @pty.pid
     end
 
