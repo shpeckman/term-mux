@@ -3,13 +3,13 @@ require "./spec_helper"
 
 class SpecDelegate < Term::Mux::ServerDelegate
   getter attaches = [] of Term::Mux::Protocol::AttachInfo
-  getter inputs = [] of String
-  getter resizes = [] of Tuple(Int32, Int32)
+  getter inputs   = [] of String
+  getter resizes  = [] of Tuple(Int32, Int32)
   getter commands = [] of Array(String)
   getter detaches = 0
-  getter ticks = 0
+  getter ticks    = 0
 
-  property server : Term::Mux::Server?
+  property server           : Term::Mux::Server?
   property render_on_attach : String?
 
   def on_attach(client : Term::Mux::ClientConn, info : Term::Mux::Protocol::AttachInfo) : Nil

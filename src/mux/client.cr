@@ -1,21 +1,10 @@
 # src/mux/client.cr
 class Term::Mux::Client
-  INPUT_MODES = [
-    Sequences::BRACKETED_PASTE,
-    Sequences::MOUSE_ANY_EVENT,
-    Sequences::MOUSE_SGR_PIXELS,
-    Sequences::FOCUS_EVENTS,
-    Sequences::IN_BAND_RESIZE,
-    Sequences::GRAPHEME_CLUSTERING,
-    Sequences::COLOR_SCHEME_UPDATES,
-  ]
-
-  KITTY_FLAGS = 31
-
   @io      : UNIXSocket?
   @running : Bool = true
 
-  def initialize(@socket_path : String, @daemon_path : String? = nil)
+  def initialize(@socket_path : String, @daemon_path : String? = nil,
+                 @setup : Bytes = Bytes.empty, @teardown : Bytes = Bytes.empty)
   end
 
   def send_command(argv : Array(String)) : {Bool, String}
@@ -54,7 +43,7 @@ class Term::Mux::Client
       end
     end
 
-    enable_input
+    write_terminal(@setup)
 
     exit_code = 0
     begin
@@ -88,30 +77,16 @@ class Term::Mux::Client
       if raw
         LibC.tcsetattr(0, LibC::TCSANOW, pointerof(old_termios))
       end
-      disable_input
+      write_terminal(@teardown)
       io.close rescue nil
     end
 
     exit_code
   end
 
-  private def enable_input : Nil
-    em = Emitter.new(256)
-    em.alt_screen(true)
-    INPUT_MODES.each { |pair| em.mode(pair, true) }
-    em.kitty_keyboard(KITTY_FLAGS)
-    STDOUT.write(em.bytes)
-    STDOUT.flush
-  end
-
-  private def disable_input : Nil
-    em = Emitter.new(256)
-    em.kitty_keyboard(0)
-    INPUT_MODES.reverse_each { |pair| em.mode(pair, false) }
-    em.sgr_reset
-    em.cursor_visible(true)
-    em.alt_screen(false)
-    STDOUT.write(em.bytes)
+  private def write_terminal(bytes : Bytes) : Nil
+    return if bytes.empty?
+    STDOUT.write(bytes)
     STDOUT.flush
   end
 

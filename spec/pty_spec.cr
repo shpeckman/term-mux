@@ -42,7 +42,7 @@ describe Term::Mux::PtyHost, tags: "integration" do
   end
 
   it "runs the child in its own session" do
-    out = run_host(80, 24, "ps -o sid= -p $$", Dir.current) { }
+    out       = run_host(80, 24, "ps -o sid= -p $$", Dir.current) { }
     child_sid = out.strip.to_i
     child_sid.should_not eq(`ps -o sid= -p #{Process.pid}`.strip.to_i)
   end
@@ -82,7 +82,7 @@ describe Term::Mux::PtyHost, tags: "integration" do
   end
 
   it "reaps the child rather than leaving a zombie" do
-    host = Term::Mux::PtyHost.new(80, 24, "exit 7", Dir.current)
+    host   = Term::Mux::PtyHost.new(80, 24, "exit 7", Dir.current)
     status = host.pty.wait
     status.exit_code.should eq(7)
     host.close

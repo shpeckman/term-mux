@@ -367,7 +367,7 @@ describe Term::Mux::InputFilter do
 
   describe "pass_next" do
     it "forwards the next byte untouched" do
-      fired  = 0
+      fired = 0
       filter = uninitialized Term::Mux::InputFilter
       filter = Term::Mux::InputFilter.new
       filter.on_byte(0x02_u8) do

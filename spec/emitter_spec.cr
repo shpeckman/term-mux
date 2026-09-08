@@ -184,7 +184,7 @@ describe Term::Mux::Emitter do
       em = Term::Mux::Emitter.new
       em.focus_events(true)
 
-      seen = 0
+      seen   = 0
       filter = Term::Mux::InputFilter.new
       filter.on(Term::Mux::Sequences::FOCUS_EVENTS) do |token|
         seen += 1
