@@ -4,7 +4,7 @@ class Term::Mux::Client
   @running : Bool = true
 
   def initialize(@socket_path : String, @daemon_path : String? = nil,
-                 @setup : Bytes = Bytes.empty, @teardown : Bytes = Bytes.empty)
+                 @terminal : HostTerminal = HostTerminal.new)
   end
 
   def send_command(argv : Array(String)) : {Bool, String}
@@ -33,61 +33,41 @@ class Term::Mux::Client
     return 1 unless io
     @io = io
 
-    old_termios = LibC::Termios.new
-    raw         = false
-    if LibC.tcgetattr(0, pointerof(old_termios)) == 0
-      raw_termios = old_termios
-      LibC.cfmakeraw(pointerof(raw_termios))
-      if LibC.tcsetattr(0, LibC::TCSANOW, pointerof(raw_termios)) == 0
-        raw = true
-      end
-    end
-
-    write_terminal(@setup)
-
     exit_code = 0
     begin
-      Protocol.write(io, Protocol::Kind::Attach, info.encode)
-
-      spawn stdin_loop(io)
-
-      Signal::WINCH.trap do
-        c, r, _, _ = self.class.tty_size
-        @io.try { |s| Protocol.write(s, Protocol::Kind::Resize, Protocol.encode_xy(c, r)) rescue nil }
-      end
-
-      while @running
-        msg = Protocol.read(io)
-        break unless msg
-        kind, payload = msg
-        case kind
-        when .render?
-          STDOUT.write(payload)
-          STDOUT.flush
-        when .bell?
-          STDOUT.write_byte(0x07_u8)
-          STDOUT.flush
-        when .exit?
-          exit_code = payload.size > 0 ? payload[0].to_i32 : 0
-          @running  = false
-        else
+      @terminal.session do
+        Protocol.write(io, Protocol::Kind::Attach, info.encode)
+        spawn stdin_loop(io)
+        @terminal.on_resize do |size|
+          @io.try { |s| Protocol.write(s, Protocol::Kind::Resize, Protocol.encode_xy(size.cols, size.rows)) rescue nil }
         end
+        exit_code = render_loop(io)
       end
     ensure
-      if raw
-        LibC.tcsetattr(0, LibC::TCSANOW, pointerof(old_termios))
-      end
-      write_terminal(@teardown)
       io.close rescue nil
     end
 
     exit_code
   end
 
-  private def write_terminal(bytes : Bytes) : Nil
-    return if bytes.empty?
-    STDOUT.write(bytes)
-    STDOUT.flush
+  private def render_loop(io : UNIXSocket) : Int32
+    exit_code = 0
+    while @running
+      msg = Protocol.read(io)
+      break unless msg
+      kind, payload = msg
+      case kind
+      when .render?
+        @terminal.write(payload)
+      when .bell?
+        @terminal.bell
+      when .exit?
+        exit_code = payload.size > 0 ? payload[0].to_i32 : 0
+        @running  = false
+      else
+      end
+    end
+    exit_code
   end
 
   private def connect_or_fail : UNIXSocket?
@@ -123,7 +103,7 @@ class Term::Mux::Client
   private def stdin_loop(io : UNIXSocket) : Nil
     buf = Bytes.new(4096)
     while @running
-      n = STDIN.read(buf)
+      n = @terminal.read(buf)
       break if n <= 0
       Protocol.write(io, Protocol::Kind::Input, buf[0, n])
     end
@@ -131,11 +111,7 @@ class Term::Mux::Client
   end
 
   def self.tty_size : {Int32, Int32, Int32, Int32}
-    ws = LibPty::Winsize.new
-    if LibPty.ioctl(1, LibPty::TIOCGWINSZ, pointerof(ws)) == 0 && ws.ws_col > 0 && ws.ws_row > 0
-      {ws.ws_col.to_i32, ws.ws_row.to_i32, ws.ws_xpixel.to_i32, ws.ws_ypixel.to_i32}
-    else
-      {(ENV["COLUMNS"]? || "80").to_i, (ENV["LINES"]? || "24").to_i, 0, 0}
-    end
+    size = HostTerminal.size_of(1) || HostTerminal.env_size
+    {size.cols, size.rows, size.xpixel, size.ypixel}
   end
 end
