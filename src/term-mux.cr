@@ -4,13 +4,13 @@ require "file_utils"
 
 require "./mux/protocol"
 require "./mux/pty"
-require "./mux/host_terminal"
 require "./mux/sequence"
 require "./mux/emitter"
 require "./mux/input_filter"
 require "./mux/output_filter"
 require "./mux/client"
 require "./mux/server"
+require "./mux/middleman"
 
 module Term::Mux
   VERSION = {{ `shards version "#{__DIR__}"`.chomp.stringify }}
