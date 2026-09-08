@@ -193,11 +193,11 @@ module Term::Mux
     @copying    : Bool  = false
     @passed     : Int32 = 0
 
-    @byte_rules      : Array(Handler?)          = Array(Handler?).new(TABLE, nil)
-    @byte_mask       : StaticArray(UInt64, 4)   = StaticArray(UInt64, 4).new(0_u64)
+    @byte_rules      : Array(Handler?)               = Array(Handler?).new(TABLE, nil)
+    @byte_mask       : StaticArray(UInt64, 4)        = StaticArray(UInt64, 4).new(0_u64)
     @byte_list       : StaticArray(UInt8, SCAN_LIST) = StaticArray(UInt8, SCAN_LIST).new(0_u8)
-    @byte_list_size  : Int32                    = 0
-    @byte_rule_count : Int32                    = 0
+    @byte_list_size  : Int32                         = 0
+    @byte_rule_count : Int32                         = 0
 
     @csi_rules    : Array(Array(CsiRule)?) = Array(Array(CsiRule)?).new(TABLE, nil)
     @ss3_rules    : Array(Handler?)        = Array(Handler?).new(TABLE, nil)
@@ -573,8 +573,8 @@ module Term::Mux
           break if values >= MAX_PARAMS
           @params_buf[values] = seen ? value : Token::ABSENT
           values += 1
-          value  = 0
-          seen   = false
+          value = 0
+          seen  = false
           groups += 1
           @starts_buf[groups] = values
         else

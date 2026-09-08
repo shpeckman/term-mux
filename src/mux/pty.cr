@@ -164,9 +164,28 @@ module Term::Mux
 
     def current_command : String
       fg = @pty.foreground_pid
-      File.read("/proc/#{fg}/comm").strip
+      File.read("/proc/#{deepest_in_group(fg, fg)}/comm").strip
     rescue
       ""
+    end
+
+    private def deepest_in_group(pid : Int32, pgrp : Int32) : Int32
+      current = pid
+      loop do
+        children = [] of Int32
+        Dir.each_child("/proc") do |entry|
+          next unless entry.to_i?
+          stat   = File.read("/proc/#{entry}/stat") rescue next
+          close  = stat.rindex(')') || next
+          fields = stat[(close + 2)..].split(' ')
+          next unless fields[1]?.try(&.to_i?) == current
+          next unless fields[2]?.try(&.to_i?) == pgrp
+          children << entry.to_i
+        end
+        break unless children.size == 1
+        current = children.first
+      end
+      current
     end
 
     def resize(cols : Int32, rows : Int32) : Nil
