@@ -38,14 +38,14 @@ describe Term::Mux::Middleman, tags: "integration" do
 
   it "applies output filter rules to child output" do
     _, out = run_mid("printf abc") do |mid|
-      mid.output.on_byte('b') { |t| Term::Mux::Disposition.replace("B") }
+      mid.output.on_byte('b') { |t| Term::Seq::Disposition.replace("B") }
     end
     out.should contain("aBc")
   end
 
   it "drops filtered child output" do
     _, out = run_mid("printf abc") do |mid|
-      mid.output.on_byte('b') { |t| Term::Mux::Disposition.drop }
+      mid.output.on_byte('b') { |t| Term::Seq::Disposition.drop }
     end
     out.should contain("ac")
     out.should_not contain("abc")
@@ -58,7 +58,7 @@ describe Term::Mux::Middleman, tags: "integration" do
 
   it "applies input filter rules to host input" do
     _, out = run_mid("read line; printf 'got:%s' \"$line\"", IO::Memory.new("ping\n")) do |mid|
-      mid.input.on_byte('p') { |t| Term::Mux::Disposition.replace("P") }
+      mid.input.on_byte('p') { |t| Term::Seq::Disposition.replace("P") }
     end
     out.should contain("got:Ping")
   end

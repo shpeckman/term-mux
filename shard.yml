@@ -1,6 +1,6 @@
 # shard.yml
 name: term-mux
-version: 0.12.2
+version: 0.13.0
 
 authors:
   - shpeckman <geelenrobin@proton.me>
@@ -8,3 +8,7 @@ authors:
 crystal: '>= 1.21.0'
 
 license: MIT
+
+dependencies:
+  term-seq:
+    github: shpeckman/term-seq

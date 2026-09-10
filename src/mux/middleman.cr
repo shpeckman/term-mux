@@ -2,8 +2,8 @@
 class Term::Mux::Middleman
   TICK = 8.milliseconds
 
-  getter input  : InputFilter
-  getter output : OutputFilter
+  getter input  : Term::Seq::InputFilter
+  getter output : Term::Seq::OutputFilter
 
   @pty_host : PtyHost?
   @running  : Bool = false
@@ -12,9 +12,9 @@ class Term::Mux::Middleman
                  @setup : Bytes = Bytes.empty, @teardown : Bytes = Bytes.empty,
                  escape_ticks : Int32 = 2,
                  @host_in     : IO    = STDIN, @host_out : IO = STDOUT)
-    @input          = InputFilter.new(escape_ticks)
-    @output         = OutputFilter.new
-    @emitter        = Emitter.new
+    @input          = Term::Seq::InputFilter.new(escape_ticks)
+    @output         = Term::Seq::OutputFilter.new
+    @emitter        = Term::Seq::Emitter.new
     @input_mutex    = Mutex.new
     @host_out_mutex = Mutex.new
     @child_in_mutex = Mutex.new
@@ -63,12 +63,12 @@ class Term::Mux::Middleman
     end
   end
 
-  def inject_host(& : Emitter ->) : Nil
+  def inject_host(& : Term::Seq::Emitter ->) : Nil
     yield @emitter
     write_host(@emitter.take)
   end
 
-  def inject_child(& : Emitter ->) : Nil
+  def inject_child(& : Term::Seq::Emitter ->) : Nil
     yield @emitter
     write_child(@emitter.take)
   end
